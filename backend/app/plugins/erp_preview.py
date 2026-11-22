@@ -3,6 +3,15 @@
 Correctly averages across trials FIRST to extract phase-locked evoked potentials per channel
 `(n_ch, n_times)`, then computes Global Field Power (RMS across channels) — avoiding the
 common pitfall of averaging single-trial RMS (which reflects ongoing total amplitude).
+
+Compliance note (SOP rule R1)
+-----------------------------
+`anchor_vs_mid` is NOT a clean condition contrast.  Anchor tones carry a fixed correct
+key (so they co-vary with hand), always carry feedback (win/avoid), and are the only
+tones with a valence label; ambiguous mid tones have none of those.  The contrast is
+therefore labelled "锚点音 vs 模糊中音（手侧/反馈/效价共同变化）" and the plugin reports
+the anchor hand-agreement rate alongside it.  For a defensible condition effect use the
+`condition_stats` plugin, which reports A/B/C flavours and the hand diagnostics.
 """
 
 from __future__ import annotations
@@ -11,7 +20,9 @@ from typing import Any
 import os
 import numpy as np
 
+from .. import stats_core as sc
 from ..plugin_base import AnalysisPlugin, PluginContext
+from .condition_stats import build_design_columns, hand_agreement
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig_jbs")
 
@@ -19,8 +30,8 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig_jbs")
 class ErpPreviewPlugin(AnalysisPlugin):
     plugin_id = "erp_preview"
     name = "条件平均 ERP（锁相诱发电位 GFP）预览"
-    version = "1.1.0"
-    description = "先按试次平均得到各通道锁相诱发电位（Evoked），再计算跨通道 GFP/RMS，对比锚点音与模糊中间音（或正/负选择）。"
+    version = "1.2.0"
+    description = "先按试次平均得到各通道锁相诱发电位（Evoked），再计算跨通道 GFP/RMS。这是描述性预览，不是条件效应检验；做效应请用 condition_stats 插件。"
     category = "electrophysiology"
     requires = ["preprocess"]
     params_schema = [
@@ -30,8 +41,8 @@ class ErpPreviewPlugin(AnalysisPlugin):
             "type": "select",
             "default": "anchor_vs_mid",
             "options": [
-                {"value": "anchor_vs_mid", "label": "锚点音 vs 模糊中间音"},
-                {"value": "pos_vs_neg_choice", "label": "正性选择 vs 负性选择"},
+                {"value": "anchor_vs_mid", "label": "锚点音 vs 模糊中间音（手侧/反馈/效价共同变化）"},
+                {"value": "pos_vs_neg_choice", "label": "正性选择 vs 负性选择（与 RT/运动相关）"},
             ],
         },
         {
@@ -61,14 +72,33 @@ class ErpPreviewPlugin(AnalysisPlugin):
 
         contrast = params.get("contrast", "anchor_vs_mid")
         meta = epochs.metadata
+        if meta is None:
+            raise ValueError(
+                "Epochs 缺少 metadata，无法按条件分组。请用 Step 5 重新生成（勾选保留 metadata）。"
+            )
+
+        # R1: quantify how entangled the contrast is with hand before drawing anything.
+        cols = build_design_columns(meta)
+        agree = hand_agreement(cols)
+        rate = agree["agree_rate"]
+        hand_entangled = bool(np.isfinite(rate) and rate >= sc.thresholds()["hand_agree_95"])
+
         if contrast == "pos_vs_neg_choice":
-            m1 = meta["choice_sem"] == "pos"
-            m2 = meta["choice_sem"] == "neg"
+            m1 = np.asarray([c == "pos" for c in cols["choice_sem"]])
+            m2 = np.asarray([c == "neg" for c in cols["choice_sem"]])
             l1, l2 = "Positive Choice", "Negative Choice"
+            contrast_note = (
+                "正性 vs 负性选择与按键手侧几乎完全共变（右手答正/左手的映射每个被试固定），"
+                "且与 RT 相关；本图只能当运动/反应相关的描述，不能当效价效应。"
+            )
         else:
-            m1 = meta["is_ambiguous"] == False  # noqa: E712
-            m2 = meta["is_ambiguous"] == True   # noqa: E712
+            m1 = ~cols["is_mid"]
+            m2 = cols["is_mid"]
             l1, l2 = "Anchor Tones", "Ambiguous Mids"
+            contrast_note = (
+                "锚点音与模糊中音同时改变了手侧（锚点按键固定）、反馈（锚点有赢/避，中音无）"
+                "和效价标签（只有锚点有）；三者无法在本对比内分离。"
+            )
 
         data = epochs.get_data() * 1e6  # (n_trials, n_ch, n_times) in uV
         times = epochs.times
@@ -80,11 +110,11 @@ class ErpPreviewPlugin(AnalysisPlugin):
             evoked = np.mean(data[mask_arr], axis=0)
             return np.sqrt(np.mean(evoked**2, axis=0))
 
-        g1 = evoked_gfp(m1.values)
-        g2 = evoked_gfp(m2.values)
+        g1 = evoked_gfp(m1)
+        g2 = evoked_gfp(m2)
 
         out_png = ctx.output_dir / f"plugin_erp_{contrast}.png"
-        fig, ax = plt.subplots(figsize=(8.5, 4.2), dpi=150, facecolor="#0f172a")
+        fig, ax = plt.subplots(figsize=(8.5, 4.9), dpi=150, facecolor="#0f172a")
         ax.set_facecolor("#1e293b")
         ax.tick_params(colors="#cbd5e1")
         ax.xaxis.label.set_color("#e2e8f0")
@@ -98,18 +128,37 @@ class ErpPreviewPlugin(AnalysisPlugin):
         ax.set_xlabel("Time relative to event (s)")
         ax.set_ylabel("Evoked GFP / RMS (µV)")
         title_scope = f"Shaft {prefix}" if prefix else f"All {len(epochs.ch_names)} channels"
-        ax.set_title(f"Phase-Locked Evoked ERP (GFP) — {title_scope}")
-        ax.legend(facecolor="#0f172a", edgecolor="#334155", labelcolor="#e2e8f0")
-        fig.tight_layout()
+        title = f"Evoked GFP — {title_scope}"
+        if contrast == "anchor_vs_mid" and hand_entangled:
+            title += "\n[条件（与手侧共变）· 非效价/决策效应]"
+        ax.set_title(title, fontsize=10)
+        ax.legend(facecolor="#0f172a", edgecolor="#334155", labelcolor="#e2e8f0", fontsize=8)
+        fig.text(
+            0.01, 0.01,
+            contrast_note
+            + (f"  锚点手侧符合率 {agree['n_agree']}/{agree['n_anchor']}。" if agree["available"] else ""),
+            color="#94a3b8", fontsize=6.6, wrap=True,
+        )
+        fig.tight_layout(rect=[0, 0.055, 1, 1])
         fig.savefig(out_png, dpi=150, facecolor=fig.get_facecolor())
         plt.close(fig)
 
+        label = "条件（与手侧共变）" if hand_entangled else "条件"
         return {
-            "summary": f"已计算锁相诱发 GFP：{l1} ({int(m1.sum())} trials) vs {l2} ({int(m2.sum())} trials)，通道数 {len(epochs.ch_names)}。",
+            "summary": (
+                f"已计算锁相诱发 GFP：{l1} ({int(m1.sum())} trials) vs {l2} ({int(m2.sum())} trials)，"
+                f"通道数 {len(epochs.ch_names)}。对比标签：{label}；"
+                "这是描述性预览，条件效应请用 condition_stats 插件（A/B/C 三口径）。"
+            ),
             "metrics": {
                 "n_channels": len(epochs.ch_names),
                 "n_group1": int(m1.sum()),
                 "n_group2": int(m2.sum()),
+                "contrast_label": label,
+                "hand_agrees_with_mapping": f"{agree['n_agree']}/{agree['n_anchor']}"
+                if agree["available"] else "不可用",
+                "hand_agree_rate": agree["agree_rate"],
+                "descriptive_only": True,
             },
             "image_path": str(out_png),
         }
