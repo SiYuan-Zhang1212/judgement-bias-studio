@@ -16,7 +16,10 @@ from .trigger_sync import sync_subject_triggers
 from .behavior_analysis import analyze_behavior
 from .seeg_preprocess import inspect_edf_channels_qc, run_pnas2025_preprocess
 from .electrode_pipeline import (
+    Step4Unavailable,
     auto_pick_series,
+    is_step4_available,
+    step4_unavailable_detail,
     run_electrode_localization,
     apply_bindings_and_regenerate_contacts,
     build_series_volume3d,
@@ -198,6 +201,7 @@ def health():
         "n_subjects": len(store.list_subjects()),
         "n_plugins": len(PLUGINS),
         "plugin_errors": list(LAST_PLUGIN_ERRORS),
+        "step4_available": is_step4_available(),
         "ai": ai_store.public_view(),
     }
 
@@ -484,6 +488,8 @@ def get_behavior(subject_id: str):
 # --- STEP 4: Electrode Localization + 3D Volume ---
 @app.post("/api/volume3d/{uid}")
 def api_volume3d(uid: str, req: Volume3dReq):
+    if not is_step4_available():
+        raise HTTPException(status_code=503, detail=step4_unavailable_detail())
     meta = _ensure_series_in_catalog(uid)
     ckey = f"{uid}|{req.mask_path}"
     if ckey in _VOL3D_CACHE:
@@ -497,8 +503,10 @@ def api_volume3d(uid: str, req: Volume3dReq):
                 description=meta["description"],
                 mask_path=req.mask_path,
             )
-        except Exception as e:
-            raise HTTPException(400, str(e))
+        except Step4Unavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         if len(_VOL3D_CACHE) >= 6:
             _VOL3D_CACHE.clear()
         _VOL3D_CACHE[ckey] = (info, payload)
@@ -532,17 +540,20 @@ def run_localization(subject_id: str, req: LocalizationReq):
         except Exception:
             doctor_tbl = None
 
-    res = run_electrode_localization(
-        mri_dir=paths["mri_dir"],
-        ct_dir=paths["ct_dir"],
-        output_dir=out_dir,
-        mr_uid=req.mr_uid,
-        ct_uid=req.ct_uid,
-        hu_threshold=req.hu_threshold,
-        contact_spacing_mm=req.contact_spacing_mm,
-        edf_shafts=edf_shafts,
-        doctor_table=doctor_tbl,
-    )
+    try:
+        res = run_electrode_localization(
+            mri_dir=paths["mri_dir"],
+            ct_dir=paths["ct_dir"],
+            output_dir=out_dir,
+            mr_uid=req.mr_uid,
+            ct_uid=req.ct_uid,
+            hu_threshold=req.hu_threshold,
+            contact_spacing_mm=req.contact_spacing_mm,
+            edf_shafts=edf_shafts,
+            doctor_table=doctor_tbl,
+        )
+    except Step4Unavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
     store.update_step(
         subject_id,
         "localization",
@@ -570,6 +581,8 @@ def get_localization(subject_id: str):
 
 @app.post("/api/subjects/{subject_id}/localization/bindings")
 def save_shaft_bindings(subject_id: str, req: BindingUpdateReq):
+    # 注：apply_bindings_and_regenerate_contacts 仅基于已保存的 electrode_localization.json
+    # 做纯 NumPy 几何重算与医生表脑区覆盖，不依赖 seeg-workbench，因此故意不加 sino 依赖。
     out_dir = store.subject_out_dir(subject_id) / "localization"
     p = out_dir / "electrode_localization.json"
     if not p.exists():

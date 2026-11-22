@@ -10,7 +10,48 @@
     vol3dSeriesMap: new Map(),
     curVolUid: null,
     cameraStream: null,
+    step4Available: true,
   };
+
+  function applyStep4Availability(available) {
+    state.step4Available = !!available;
+    const banner = $('#step4UnavailBanner');
+    const btnRun = $('#btnRunLocalization');
+    const btnVol = $('#btnLoadVol3d');
+    const shell = document.querySelector('#panel-localization .vol3d-shell');
+    const volMsg = $('#volMsg');
+    const disabled = !state.step4Available;
+
+    if (banner) banner.style.display = disabled ? '' : 'none';
+    if (btnRun) {
+      btnRun.disabled = disabled;
+      btnRun.style.opacity = disabled ? '0.45' : '';
+      btnRun.style.cursor = disabled ? 'not-allowed' : '';
+      btnRun.title = disabled ? 'Step 4 依赖 seeg-workbench，未安装。' : '';
+    }
+    if (btnVol) {
+      btnVol.disabled = disabled;
+      btnVol.style.opacity = disabled ? '0.45' : '';
+      btnVol.style.cursor = disabled ? 'not-allowed' : '';
+    }
+    if (shell) {
+      shell.style.opacity = disabled ? '0.45' : '';
+      shell.style.pointerEvents = disabled ? 'none' : '';
+      shell.querySelectorAll('select, input, button').forEach((ctrl) => {
+        ctrl.disabled = disabled;
+      });
+    }
+    if (disabled && volMsg) {
+      volMsg.textContent = 'Step 4 依赖 seeg-workbench，未安装。';
+    }
+  }
+
+  async function loadHealth() {
+    const h = await api('/api/health');
+    if (typeof h.step4_available === 'boolean') {
+      applyStep4Availability(h.step4_available);
+    }
+  }
 
   function requireSubject() {
     if (!state.curId) {
@@ -733,15 +774,21 @@
       state.curStep = btn.dataset.step;
       $$('.step-tab').forEach((b) => b.classList.toggle('active', b === btn));
       $$('.step-panel').forEach((p) => p.classList.toggle('active', p.id === `panel-${state.curStep}`));
-      if (state.curStep === 'localization' && !state.curVolUid) {
+      if (state.curStep === 'localization' && state.step4Available && !state.curVolUid) {
         const targetUid = state.locData?.mr_uid || $('#selVol3dSeries').value;
         if (targetUid) openSeriesIn3D(targetUid);
       }
     };
   });
 
-  $('#btnLoadVol3d').onclick = () => openSeriesIn3D($('#selVol3dSeries').value);
-  $('#selVol3dSeries').onchange = () => openSeriesIn3D($('#selVol3dSeries').value);
+  $('#btnLoadVol3d').onclick = () => {
+    if (!state.step4Available) return;
+    openSeriesIn3D($('#selVol3dSeries').value);
+  };
+  $('#selVol3dSeries').onchange = () => {
+    if (!state.step4Available) return;
+    openSeriesIn3D($('#selVol3dSeries').value);
+  };
 
   $('#btnRunIntake').onclick = async () => {
     if (!requireSubject()) return;
@@ -771,6 +818,7 @@
   };
 
   $('#btnRunLocalization').onclick = async () => {
+    if (!state.step4Available) return;
     if (!requireSubject()) return;
     setBusy(true, '正在执行术后 CT 电极检测、CT→MR 配准与 MNI 脑区标注（约 15-30 秒）…');
     try {
@@ -915,6 +963,7 @@
 
   // Fault-tolerant Boot: subjects ALWAYS load first even if optional endpoints fail
   (async () => {
+    try { await loadHealth(); } catch (e) { console.warn('loadHealth failed:', e); }
     try { await loadSubjects(); } catch (e) { console.error('loadSubjects failed:', e); }
     try { await loadPlugins(); } catch (e) { console.warn('loadPlugins failed:', e); }
     try { await loadAiConfig(); } catch (e) { console.warn('loadAiConfig failed:', e); }

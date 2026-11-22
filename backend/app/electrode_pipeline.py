@@ -1,18 +1,17 @@
-"""Electrode localization, physically oriented tip/entry detection, shaft binding, and MNI approx.
+"""电极定位、深浅端物理定向、电极杆绑定与近似 MNI 坐标映射。
 
-Key accuracy & safety guarantees:
-1. Deep Tip (#1) vs Superficial Entry orientation is computed from the 3D Euclidean distance
-   to the CT head outer surface (`edt_mm`), NEVER from raw Z sign! Contact #1 is guaranteed to
-   be the deepest intracranial contact, moving outward toward the skull surface.
-2. Re-generating exact contacts on EDF/Doctor binding: persists shaft geometry (`tip_xyz`,
-   `entry_xyz`, `axis`) and rigid CT->MR 4x4 transform so binding a CT shaft to an EDF/doctor
-   shaft regenerates the exact contact count (e.g. 9..16) rather than guessing from metal length.
-3. Orientation-invariant brain mask for MNI approximation: resamples MR to canonical LPS via
-   `t1_candidate` (works identically on sagittal, axial, coronal, and oblique MRI — never slices
-   voxel Z!). Explicitly marks approximate MNI coordinates as `approx_only=True` and prioritizes
-   doctor-verified anatomical labels whenever bound.
-4. Emits explicit QC warnings when CT-detected shaft count differs from EDF or Doctor table count,
-   and preserves previous shaft bindings across re-runs.
+为什么把同级 `seeg-workbench` 模块改为惰性加载：
+本工作台仅 Step 4（CT 电极自动检测、刚体配准、3D 脑预览）依赖同级仓库 `seeg-workbench`。
+如果把 `seeg-workbench` 的导入放在模块顶层，一旦用户单独 clone 本仓库而未安装同级目录，
+就会在 `import backend.app.main` 阶段直接抛错，导致整个 FastAPI 后端与 Step 1–3/5–6 全部瘫痪。
+改为调用期惰性加载后，缺失同级文件会明确抛出 `Step4Unavailable`（API 层转为 503），
+而模块已存在但内部存在语法错误或导入异常时则原样冒泡，避免掩盖真实故障。
+
+关键科学/工程约束（保持原有口径不变）：
+1. 深端（1 号触点）与浅端（入点）基于 CT 头体 3D 距离场（`edt_mm`）定向，不依赖 Z 轴正负。
+2. 绑定 EDF/医生表电极杆后基于已持久化的几何轴与 4×4 刚体矩阵重算触点，无需依赖 sino 模块。
+3. 近似 MNI 坐标基于规范 LPS 脑实质包围盒估计，明确标注 `approx_only=True`，医生表优先。
+4. CT 检出电极数与 EDF/医生表不一致时显式输出 QC 警告，重跑定位时保留历史绑定。
 """
 
 from __future__ import annotations
@@ -30,31 +29,105 @@ from scipy import ndimage as ndi
 
 
 _SIBLING_APP_DIR = Path(__file__).resolve().parents[3] / "seeg-workbench" / "backend" / "app"
+_REQUIRED_SINO_MODULES = ("electrode_detect", "pipeline", "volume_preview")
+
+# 仅在三个模块全部加载成功后才写入缓存：(加载时的目录 Path, (detect, pipe, vol))。
+# 失败或半初始化状态绝不写入缓存，且目录变更（如测试 monkeypatch）时自动失效。
+_SINO_MODULES_CACHE: tuple[Path, tuple[Any, Any, Any]] | None = None
+
+
+class Step4Unavailable(RuntimeError):
+    """同级依赖仓库 `seeg-workbench` 或其所需模块文件缺失时抛出。
+
+    仅用于区分“可选依赖未安装”与“依赖已存在但加载时报语法/运行错误”：
+    前者由 API 层转为 503 并给出安装路径指引，后者必须原样向上冒泡。
+    """
+
+
+def _missing_sino_files() -> list[Path]:
+    """返回缺失的同级 sino 模块文件路径列表（纯文件存在性检查，不执行任何 import）。"""
+    return [
+        _SIBLING_APP_DIR / f"{name}.py"
+        for name in _REQUIRED_SINO_MODULES
+        if not (_SIBLING_APP_DIR / f"{name}.py").is_file()
+    ]
+
+
+def is_step4_available() -> bool:
+    """低开销检查 Step 4 所需的同级模块文件是否齐全（不做真实 import，无副作用）。"""
+    return len(_missing_sino_files()) == 0
+
+
+def step4_unavailable_detail() -> str:
+    """生成面向用户的可操作错误说明（包含缺失文件、期望路径及修复方法）。"""
+    missing = _missing_sino_files()
+    missing_names = ", ".join(p.name for p in missing) if missing else ", ".join(
+        f"{m}.py" for m in _REQUIRED_SINO_MODULES
+    )
+    return (
+        f"Step 4 不可用：缺少同级依赖文件 [{missing_names}]，"
+        f"期望目录路径为 {_SIBLING_APP_DIR}。"
+        f"修复方法：请将 `seeg-workbench` 仓库放置到与 `judgement-bias-studio` 相同的父目录下后重试。"
+    )
+
+
+def _reset_sino_cache() -> None:
+    """清空惰性加载缓存及 `_sino_app` 命名空间，仅供测试隔离使用。"""
+    global _SINO_MODULES_CACHE
+    _SINO_MODULES_CACHE = None
+    for key in [k for k in list(sys.modules.keys()) if k == "_sino_app" or k.startswith("_sino_app.")]:
+        sys.modules.pop(key, None)
 
 
 def _load_sino_module(mod_name: str):
-    if not (_SIBLING_APP_DIR / f"{mod_name}.py").exists():
-        raise FileNotFoundError(
-            f"未找到同级依赖模块 {_SIBLING_APP_DIR / (mod_name + '.py')}，请确认 `seeg-workbench` 与本仓库位于同一父目录。"
-        )
+    """按需加载单个同级 sino 模块；文件缺失抛 `Step4Unavailable`，其他异常原样冒泡。"""
+    mod_path = _SIBLING_APP_DIR / f"{mod_name}.py"
+    if not mod_path.is_file():
+        raise Step4Unavailable(step4_unavailable_detail())
+
     pkg_name = "_sino_app"
-    if pkg_name not in sys.modules:
+    # 如果 `_sino_app` 之前指向不同目录（如测试切换 tmp_path），刷新其搜索路径
+    if pkg_name not in sys.modules or list(getattr(sys.modules[pkg_name], "__path__", [])) != [str(_SIBLING_APP_DIR)]:
+        for key in [k for k in list(sys.modules.keys()) if k == pkg_name or k.startswith(f"{pkg_name}.")]:
+            sys.modules.pop(key, None)
         pkg = types.ModuleType(pkg_name)
         pkg.__path__ = [str(_SIBLING_APP_DIR)]
         sys.modules[pkg_name] = pkg
+
     full = f"{pkg_name}.{mod_name}"
     if full in sys.modules:
         return sys.modules[full]
-    spec = importlib.util.spec_from_file_location(full, str(_SIBLING_APP_DIR / f"{mod_name}.py"))
+
+    spec = importlib.util.spec_from_file_location(full, str(mod_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法为同级模块构造导入规范：{mod_path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[full] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        # 避免把半初始化的失败模块留在 sys.modules 里
+        sys.modules.pop(full, None)
+        raise
     return mod
 
 
-_sino_detect = _load_sino_module("electrode_detect")
-_sino_pipe = _load_sino_module("pipeline")
-_sino_vol = _load_sino_module("volume_preview")
+def _get_sino_modules() -> tuple[Any, Any, Any]:
+    """惰性加载并缓存 (electrode_detect, pipeline, volume_preview) 三个同级模块。"""
+    global _SINO_MODULES_CACHE
+    if _SINO_MODULES_CACHE is not None and _SINO_MODULES_CACHE[0] == _SIBLING_APP_DIR:
+        return _SINO_MODULES_CACHE[1]
+
+    # 先整体校验文件是否存在，防止只加载了一部分模块后才发现后续文件缺失
+    if not is_step4_available():
+        raise Step4Unavailable(step4_unavailable_detail())
+
+    detect_mod = _load_sino_module("electrode_detect")
+    pipe_mod = _load_sino_module("pipeline")
+    vol_mod = _load_sino_module("volume_preview")
+    loaded = (detect_mod, pipe_mod, vol_mod)
+    _SINO_MODULES_CACHE = (_SIBLING_APP_DIR, loaded)
+    return loaded
 
 
 def build_series_volume3d(
@@ -65,9 +138,10 @@ def build_series_volume3d(
     mask_path: str = "",
 ) -> tuple[dict[str, Any], bytes]:
     """Build WebGL2-ready LPS 3D volume preview (reusing Sinovation volume_preview.py)."""
+    _, _, sino_vol = _get_sino_modules()
     img = _read_dicom_series_sitk(folder, uid)
     vkind = "ct" if kind == "ct" else ("mr-t1" if ("t1" in (description or "").lower() or kind == "mr") else "mr")
-    return _sino_vol.preview(img, vkind, mask_path=mask_path)
+    return sino_vol.preview(img, vkind, mask_path=mask_path)
 
 
 def _scan_dicom_folder(folder: Path) -> list[dict[str, Any]]:
@@ -152,8 +226,9 @@ def _build_ct_head_depth_field(ct_img) -> tuple[np.ndarray, np.ndarray, Any]:
     """
     import SimpleITK as sitk
 
+    _, _, sino_vol = _get_sino_modules()
     # Downsample by ~2mm isotropic for fast, smooth EDT
-    ref, _ = _sino_vol.lps_grid(ct_img, limit=160)
+    ref, _ = sino_vol.lps_grid(ct_img, limit=160)
     vol = sitk.Resample(ct_img, ref, sitk.Transform(), sitk.sitkLinear, -1024.0, sitk.sitkFloat32)
     arr = sitk.GetArrayFromImage(vol)  # (Z, Y, X) in canonical LPS
     step = float(ref.GetSpacing()[0])
@@ -262,11 +337,12 @@ def _estimate_mr_to_mni_lps_brain(mr_img) -> dict[str, Any]:
     """
     import SimpleITK as sitk
 
-    ref, _ = _sino_vol.lps_grid(mr_img, limit=180)
+    _, _, sino_vol = _get_sino_modules()
+    ref, _ = sino_vol.lps_grid(mr_img, limit=180)
     vol = sitk.Resample(mr_img, ref, sitk.Transform(), sitk.sitkLinear, 0.0, sitk.sitkFloat32)
     arr = sitk.GetArrayFromImage(vol)
     step = float(ref.GetSpacing()[0])
-    brain_prob = _sino_vol.t1_candidate(arr, step)
+    brain_prob = sino_vol.t1_candidate(arr, step)
     mask = brain_prob >= 0.5
     zz, yy, xx = np.where(mask)
     if len(zz) < 200:
@@ -466,6 +542,9 @@ def run_electrode_localization(
     doctor_table: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run oriented CT electrode detection -> CT-to-MR rigid registration -> MNI approx + QC."""
+    # 先行获取同级 sino 模块：缺失时立即抛 Step4Unavailable（无需浪费时间扫描 DICOM）
+    sino_detect, sino_pipe, _ = _get_sino_modules()
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -494,12 +573,12 @@ def run_electrode_localization(
     ct_img = _read_dicom_series_sitk(ct_meta["folder"], ct_uid)
 
     # 1. Detect electrodes on post-op CT & orient Deep Tip (#1) -> Superficial Entry via EDT!
-    detected_raw = _sino_detect.detect_electrodes(ct_img, hu_threshold=hu_threshold)
+    detected_raw = sino_detect.detect_electrodes(ct_img, hu_threshold=hu_threshold)
     shafts_geom = orient_electrodes_deep_to_superficial(detected_raw, ct_img)
 
     # 2. Rigid CT -> MR registration (pipeline.register_ct_to_mr already returns forward CT->MR point transform!)
-    tfm = _sino_pipe.register_ct_to_mr(ct_img, mr_img)
-    m44 = _sino_pipe.transform_to_matrix4x4(tfm)
+    tfm = sino_pipe.register_ct_to_mr(ct_img, mr_img)
+    m44 = sino_pipe.transform_to_matrix4x4(tfm)
 
     # 3. Orientation-invariant canonical LPS T1 brain parenchyma MNI approx
     mni_model = _estimate_mr_to_mni_lps_brain(mr_img)
