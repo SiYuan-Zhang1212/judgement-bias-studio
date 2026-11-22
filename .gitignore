@@ -1,0 +1,25 @@
+# Patient outputs, clinical uploads, and local AI API keys
+workspace_data/
+ai_config.json
+.env
+
+# Raw clinical / neuroimaging / electrophysiology data
+*.edf
+*.bdf
+*.fif
+*.dcm
+*.nii
+*.nii.gz
+*.mha
+*.nrrd
+*.xlsx
+*.xls
+
+# Python & macOS
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.DS_Store
+.pytest_cache/

@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Judgement Bias · SEEG 标准化分析工作台</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/static/style.css?v=1.3" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Left Sidebar: Multi-Subject Dashboard -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-badge">JB</div>
+        <div>
+          <div class="brand-title">Judgement Bias Studio</div>
+          <div class="brand-sub">SEEG + 行为 + 配准 SOP</div>
+        </div>
+      </div>
+
+      <div class="sidebar-actions">
+        <button id="btnNewSubject" class="btn btn-primary btn-full">+ 导入新被试</button>
+        <button id="btnGroupExport" class="btn btn-ghost btn-full">汇总导出全课题 CSV</button>
+      </div>
+
+      <div class="section-label">被试列表（进度看板）</div>
+      <div id="subjectList" class="subject-list"></div>
+
+      <div class="sidebar-footer">
+        <div>预处理标准：PNAS 2025 SOP</div>
+        <div>3D 配准内核：Sinovation WebGL2</div>
+        <div>AI 引擎：OpenCode Go · DeepSeek</div>
+      </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <main class="main-area">
+      <header class="topbar">
+        <div>
+          <h1 id="curSubjectTitle">请选择或导入被试</h1>
+          <div id="curSubjectMeta" class="meta-line">等待选择被试…</div>
+        </div>
+        <div class="topbar-right">
+          <span id="globalStatus" class="status-pill">就绪</span>
+          <button id="btnAiSettings" class="btn btn-ghost">⚙ AI 设置</button>
+          <button id="btnToggleAi" class="btn btn-ai">✨ AI 辅助分析</button>
+        </div>
+      </header>
+
+      <!-- 6-Step SOP Stepper -->
+      <nav class="stepper" id="stepper">
+        <button class="step-tab active" data-step="intake">
+          <span class="step-num">1</span>
+          <span>数据体检与触发对齐</span>
+        </button>
+        <button class="step-tab" data-step="clinical">
+          <span class="step-num">2</span>
+          <span>临床数据 (拍照/上传+AI)</span>
+        </button>
+        <button class="step-tab" data-step="behavior">
+          <span class="step-num">3</span>
+          <span>行为学分析</span>
+        </button>
+        <button class="step-tab" data-step="localization">
+          <span class="step-num">4</span>
+          <span>电极定位与 3D 核对</span>
+        </button>
+        <button class="step-tab" data-step="preprocess">
+          <span class="step-num">5</span>
+          <span>SEEG 预处理 (PNAS2025)</span>
+        </button>
+        <button class="step-tab" data-step="plugins">
+          <span class="step-num">6</span>
+          <span>扩展分析插件</span>
+        </button>
+      </nav>
+
+      <!-- Step Panels -->
+      <div class="content-scroll">
+        <!-- STEP 1: Intake & Trigger Sync -->
+        <section id="panel-intake" class="step-panel active">
+          <div class="guide-box">
+            <div class="guide-title">📘 Step 1 操作指引与质控要点</div>
+            <ul>
+              <li><strong>收集资料</strong>：每个被试需准备 4 项必备数据（术前 MRI、术后 CT、SEEG `.edf`、行为学 `.json`）+ <strong>1 项推荐可选数据</strong>（医生术后核对的电极位置表 `.xlsx/.csv`，有则优先采信，没有也完全不影响后续分析）。</li>
+              <li><strong>一键体检</strong>：点击下方按钮自动识别薄层 T1/CT、解析 EDF 电极杆及缺失跳号（如 `PCL4/HL6`），并解码 `POL DC02–DC07` 并口触发码（声音呈现 + 左右键反应）。</li>
+              <li><strong>漏标自愈</strong>：若实验中有个别脉冲漏打，系统会自动通过行为墙钟时间拟合线性时钟模型补齐，并在卡片中标出「墙钟补齐数」与对齐中位残差（通常应 &lt; 3 ms）。</li>
+            </ul>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Step 1 · 数据体检与并口触发对齐</h2>
+                <p class="muted">检查多模态文件完整性、EDF 通道结构、可选医生电极位置表以及毫秒级并口触发同步质量。</p>
+              </div>
+              <div class="btn-group">
+                <button class="btn btn-ai-soft btn-ai-step" data-step="intake">✨ AI 解读体检</button>
+                <button id="btnRunIntake" class="btn btn-primary">一键体检与触发对齐</button>
+              </div>
+            </div>
+            <div id="intakeBody" class="panel-body empty-hint">点击右上角按钮开始自动检查该被试的多模态数据。</div>
+          </div>
+        </section>
+
+        <!-- STEP 2: Clinical Data (Photos / Files + AI Extraction) -->
+        <section id="panel-clinical" class="step-panel">
+          <div class="guide-box">
+            <div class="guide-title">📘 临床数据录入指引（拍照 / 上传 + AI 自动填表）</div>
+            <ul>
+              <li><strong>建议收集内容</strong>：病历首页/出院小结（年龄、性别、受教育年限、癫痫病程、致痫灶、手术侧别）、抗癫痫与精神科用药清单、以及抑郁/焦虑/认知量表（如 BDI-II、HAMD、HAMA、GAD-7、MoCA/MMSE）。</li>
+              <li><strong>傻瓜化录入</strong>：可直接点「<strong>上传文件/照片</strong>」（支持 JPG/PNG、Word `.docx`、Excel `.xlsx`、TXT/CSV）或「<strong>📷 摄像头拍照</strong>」拍下纸质病历/量表，再点「<strong>✨ AI 自动识别填表</strong>」，DeepSeek 视觉模型会自动提取并填入下方结构化表单。</li>
+              <li><strong>自动汇总</strong>：保存后的临床协变量会自动进入右侧 AI 助手上下文，并随「汇总导出全课题 CSV」一起合并到行为汇总表中，方便后续做相关/回归分析。</li>
+            </ul>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>临床资料上传与 AI 结构化提取</h2>
+                <p class="muted">支持多图/文件上传、本机摄像头直接拍照，以及 OpenCode Go DeepSeek Flash 视觉+文本自动提取。</p>
+              </div>
+              <div class="btn-group">
+                <input id="clinFileInput" type="file" multiple accept="image/*,.pdf,.docx,.xlsx,.xls,.csv,.txt,.md,.json" style="display:none;" />
+                <button id="btnClinUpload" class="btn btn-ghost">📁 上传文件 / 照片</button>
+                <button id="btnClinCamera" class="btn btn-ghost">📷 摄像头拍照</button>
+                <button id="btnClinAiExtract" class="btn btn-ai">✨ AI 自动识别填表</button>
+              </div>
+            </div>
+
+            <!-- Live Camera Capture Box (toggled on click) -->
+            <div id="cameraBox" class="camera-box hidden">
+              <video id="cameraVideo" autoplay playsinline></video>
+              <canvas id="cameraCanvas" style="display:none;"></canvas>
+              <div class="camera-actions">
+                <button id="btnSnapPhoto" class="btn btn-primary">📸 拍照并上传</button>
+                <button id="btnStopCamera" class="btn btn-ghost">关闭摄像头</button>
+              </div>
+            </div>
+
+            <div class="clin-upload-area">
+              <div class="section-label">已上传的临床文件与照片</div>
+              <div id="clinFilesList" class="clin-files-grid"><div class="muted">暂无上传文件，可点击上方按钮上传或拍照。</div></div>
+            </div>
+
+            <div style="margin-top:12px;">
+              <label>补充文字粘贴（可选：直接粘贴电子病历文字或量表记录，点「AI 自动识别填表」一并提取）
+                <textarea id="clinExtraNote" rows="2" placeholder="例如：女，26岁，右利手，高中，颞叶癫痫8年，左海马致痫灶，奥卡西平600mg bid，BDI-II 14分，GAD-7 6分…"></textarea>
+              </label>
+            </div>
+            <div id="clinAiNoteBox" class="clin-ai-note hidden"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>结构化临床信息表（可手动核对修改）</h2>
+                <p class="muted">所有字段均可人工编辑，点击右上角保存后自动同步到跨被试汇总表。</p>
+              </div>
+              <div class="btn-group">
+                <button class="btn btn-ai-soft btn-ai-step" data-step="clinical">✨ AI 解读临床背景</button>
+                <button id="btnSaveClinical" class="btn btn-primary">保存临床记录</button>
+              </div>
+            </div>
+            <div class="form-row" id="clinFormGrid">
+              <label>性别<input data-ckey="sex" type="text" placeholder="男 / 女" /></label>
+              <label>年龄 (岁)<input data-ckey="age" type="text" placeholder="例如 26" /></label>
+              <label>利手<input data-ckey="handedness" type="text" placeholder="右利手 / 左利手" /></label>
+              <label>受教育年限 (年)<input data-ckey="education_years" type="text" placeholder="例如 12" /></label>
+              <label>癫痫病程 (年)<input data-ckey="epilepsy_duration_years" type="text" placeholder="例如 8" /></label>
+              <label>致痫灶 / 疑似定位<input data-ckey="seizure_onset_zone" type="text" placeholder="例如 左颞叶内侧/海马" /></label>
+              <label>SEEG 植入侧别<input data-ckey="implantation_side" type="text" placeholder="双侧 / 左侧 / 右侧" /></label>
+              <label>发作频率<input data-ckey="seizure_frequency" type="text" placeholder="例如 2-3次/月" /></label>
+              <label>抗癫痫药物 (ASM)<input data-ckey="asm_medications" type="text" placeholder="药名及剂量" /></label>
+              <label>精神科/情绪药物<input data-ckey="psych_medications" type="text" placeholder="如有请填写" /></label>
+              <label>BDI-II (抑郁)<input data-ckey="bdi_score" type="text" placeholder="总分" /></label>
+              <label>HAMD (汉密尔顿抑郁)<input data-ckey="hamd_score" type="text" placeholder="总分" /></label>
+              <label>HAMA (汉密尔顿焦虑)<input data-ckey="hama_score" type="text" placeholder="总分" /></label>
+              <label>GAD-7 (焦虑)<input data-ckey="gad7_score" type="text" placeholder="总分" /></label>
+              <label>MoCA / MMSE (认知)<input data-ckey="moca_mmse" type="text" placeholder="例如 MoCA 27" /></label>
+              <label>其他量表<input data-ckey="other_scales" type="text" placeholder="如 STAI / PHQ-9" /></label>
+            </div>
+            <label>临床综合备注 / 病史摘要
+              <textarea data-ckey="clinical_summary" rows="3" placeholder="记录影像病灶、情绪病史、术前评估要点等…"></textarea>
+            </label>
+          </div>
+        </section>
+
+        <!-- STEP 3: Behavior -->
+        <section id="panel-behavior" class="step-panel">
+          <div class="guide-box">
+            <div class="guide-title">📘 Step 3 操作指引与质控要点</div>
+            <ul>
+              <li><strong>防写死效价对齐</strong>：不同被试高/低音对应的奖惩方向可能相反，系统会自动从 `eff` 字段读取正/负锚点，统一按 <code>Neg Anchor → Near-Neg → Mid → Near-Pos → Pos Anchor</code> 排列（若数据缺失效价标记会直接报错而非猜测）。</li>
+              <li><strong>质控红线</strong>：锚点辨别力 <code>d' ≥ 1.5</code>、正/负锚点正确率 <code>≥ 75%</code>、遗漏率 <code>≤ 10%</code>；若未达标会弹出黄色提示，需在汇报或组分析中考虑是否剔除。</li>
+              <li><strong>核心指标</strong>：<code>Bias Score</code> 范围为 <code>-1（极度悲观）</code> 到 <code>+1（极度乐观）</code>；同时关注模糊音 vs 锚点音的 RT 冲突慢化与 7 次 VAS 情绪波动。</li>
+            </ul>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Step 3 · Judgement Bias 行为学分析与可视化</h2>
+                <p class="muted">直接在页面呈现交互式心理测量曲线、反应时、分 Block 稳定性与情绪轨迹，同时支持下载高清 PNG 与标准化试次 CSV。</p>
+              </div>
+              <div class="btn-group">
+                <button class="btn btn-ai-soft btn-ai-step" data-step="behavior">✨ AI 解读行为</button>
+                <button id="btnRunBehavior" class="btn btn-primary">一键运行行为分析</button>
+              </div>
+            </div>
+            <div id="behaviorBody" class="panel-body empty-hint">点击右上角按钮生成交互式行为学图表与指标。</div>
+          </div>
+        </section>
+
+        <!-- STEP 4: Electrode Localization & Interactive 3D Viewer -->
+        <section id="panel-localization" class="step-panel">
+          <div class="guide-box">
+            <div class="guide-title">📘 Step 4 操作指引与质控要点</div>
+            <ul>
+              <li><strong>深浅端自动定向</strong>：系统基于 CT 头表 3D 距离场自动确认 <strong>1 号触点位于颅内最深端</strong>，沿电极杆向外排至颅骨入点（不受矢状/冠状/侧向进针方向影响）。</li>
+              <li><strong>绑定后自动重算准确触点数</strong>：在下方映射表中把 CT 电极杆绑定到 EDF / 医生表电极名并保存，系统会立即按该杆的实际触点数（如 9–16 个）重新生成触点并写入医生核对的精准脑区。</li>
+              <li><strong>3D 核对与注意事项</strong>：拖动旋转 3D 脑核对配准；当前 MNI 坐标为基于 T1 脑实质的近似估计，精准解剖定位请以医生术后电极位置表为准。</li>
+            </ul>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Step 4 · 术后 CT 电极检测、CT→MR 配准与 3D 脑核对</h2>
+                <p class="muted">复用华科精准 WebGL2 3D 引擎与刚体配准内核，支持选序列、调阈值、切面剖切、精确触点重算及医生表优先标注。</p>
+              </div>
+              <div class="btn-group">
+                <button class="btn btn-ai-soft btn-ai-step" data-step="localization">✨ AI 解读电极分布</button>
+                <button id="btnRunLocalization" class="btn btn-primary">一键检测与配准</button>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <label>术前 MRI 序列
+                <select id="selMrUid"></select>
+              </label>
+              <label>术后 CT 序列
+                <select id="selCtUid"></select>
+              </label>
+              <label>金属阈值 (HU)
+                <input id="inpHu" type="number" value="2500" step="100" />
+              </label>
+              <label>触点间距 (mm)
+                <input id="inpSpacing" type="number" value="3.5" step="0.5" />
+              </label>
+            </div>
+
+            <!-- Interactive 3D Brain + Electrode Viewer (Sinovation WebGL2 engine) -->
+            <div class="vol3d-shell">
+              <div class="vol3d-toolbar">
+                <label class="inline-ctrl">3D 显示序列
+                  <select id="selVol3dSeries"></select>
+                </label>
+                <button id="btnLoadVol3d" class="btn btn-ghost btn-sm">加载 3D</button>
+                <label class="inline-ctrl">模式
+                  <select id="volMode">
+                    <option value="surf" selected>灰阶表面</option>
+                    <option value="vol">体渲染</option>
+                  </select>
+                </label>
+                <label class="inline-ctrl">视角
+                  <select id="volSide">
+                    <option value="R" selected>右侧 R</option>
+                    <option value="L">左侧 L</option>
+                    <option value="both">双侧</option>
+                  </select>
+                </label>
+                <label class="inline-ctrl">切面剖切
+                  <select id="volAxis">
+                    <option value="-1" selected>不剖切</option>
+                    <option value="2">轴位 Z</option>
+                    <option value="0">矢状位 X</option>
+                    <option value="1">冠状位 Y</option>
+                  </select>
+                </label>
+                <label class="inline-ctrl">剖切位置
+                  <input id="volPos" type="range" min="0" max="1" step="0.01" value="0.5" />
+                </label>
+                <label class="inline-ctrl">下阈值
+                  <input id="volLow" type="range" min="0" max="255" step="1" value="20" />
+                </label>
+                <label class="inline-ctrl">上阈值
+                  <input id="volHigh" type="range" min="0" max="255" step="1" value="255" />
+                </label>
+                <label class="inline-ctrl">不透明度
+                  <input id="volAlpha" type="range" min="0.05" max="1" step="0.05" value="0.85" />
+                </label>
+                <label class="inline-chk"><input id="volMask" type="checkbox" checked /> 脑掩膜</label>
+                <label class="inline-chk"><input id="volOverlay" type="checkbox" checked /> 电极杆</label>
+                <label class="inline-chk"><input id="volSlab" type="checkbox" /> 薄层</label>
+                <label class="inline-ctrl">定位触点
+                  <select id="volPoint"><option value="">全部触点</option></select>
+                </label>
+                <span id="volLevels" class="badge badge-blue"></span>
+                <span id="volDepth" class="badge badge-blue"></span>
+                <!-- Hidden compatibility controls required by volume3d.js -->
+                <input id="volWidth" type="range" min="1" max="40" value="8" style="display:none;" />
+                <input id="volPair" type="checkbox" style="display:none;" />
+                <button id="volCustom" style="display:none;"></button>
+                <button id="volR" style="display:none;"></button>
+                <button id="volL" style="display:none;"></button>
+              </div>
+
+              <div class="vol3d-stage">
+                <canvas id="volCanvas"></canvas>
+                <canvas id="volMarks"></canvas>
+                <div id="volMsg" class="vol3d-msg">完成 Step 1 体检后，可点击上方“加载 3D”或“一键检测与配准”查看可拖动 3D 脑与电极。</div>
+              </div>
+            </div>
+
+            <div id="localizationBody" class="panel-body empty-hint" style="margin-top:14px;">点击右上角「一键检测与配准」生成电极坐标与脑区表。</div>
+          </div>
+        </section>
+
+        <!-- STEP 5: SEEG Preprocess (PNAS 2025) -->
+        <section id="panel-preprocess" class="step-panel">
+          <div class="guide-box">
+            <div class="guide-title">📘 Step 5 操作指引与质控要点（参考 Zhang et al., PNAS 2025）</div>
+            <ul>
+              <li><strong>默认标准答案</strong>：<code>分块降采样(低内存) → CAR 重参考 → 按采样率自适应时长 Hamming FIR 陷波(50/100/150Hz) → 0.3 Hz Butterworth 高通 → 逐通道 Q3 + 2.3×IQR 癫痫样试次剔除</code>。</li>
+              <li><strong>保护海马高幅值通道</strong>：系统仅默认勾选<strong>明确坏道</strong>（平线/极强50Hz/极端伪迹，红色）；高方差但可能属正常生理活动（如海马 `HL1/HL2/HR1`）仅以<strong>黄色提醒</strong>展示并附带医生表脑区，<strong>不会默认剔除</strong>，请人工核对后再决定。</li>
+              <li><strong>触发安全锁</strong>：若 Step 1 触发匹配率低于 80% 或存在 EDF+D 录制间断，系统将禁止预处理以防错位分析。</li>
+            </ul>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Step 5 · SEEG 标准化预处理（PNAS 2025 SOP）</h2>
+                <p class="muted">低内存分块降采样 + 逐通道 IQR 癫痫样试次剔除，输出含完整行为 metadata 的标准 MNE `.fif` 文件。</p>
+              </div>
+              <div class="btn-group">
+                <button class="btn btn-ai-soft btn-ai-step" data-step="preprocess">✨ AI 解读预处理 QC</button>
+                <button id="btnRunPreprocess" class="btn btn-primary">一键运行预处理</button>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>重参考方式
+                <select id="preReref">
+                  <option value="car" selected>CAR 全脑公共平均（PNAS 2025 默认）</option>
+                  <option value="bipolar">Bipolar 相邻双极（自动跳过缺失触点）</option>
+                </select>
+              </label>
+              <label>降采样率 (Hz)
+                <select id="preSfreq">
+                  <option value="250" selected>250 Hz（LFP/时频/解码标准）</option>
+                  <option value="500">500 Hz</option>
+                  <option value="1000">1000 Hz（高频/Ripple 70-180Hz）</option>
+                </select>
+              </label>
+              <label>锁时事件
+                <select id="preLock">
+                  <option value="tone" selected>声音呈现 (Tone Onset)</option>
+                  <option value="response">被试按键 (Keydown)</option>
+                </select>
+              </label>
+              <label>基线校正
+                <select id="preBaseline">
+                  <option value="whole_epoch" selected>全 Epoch 均值（PNAS 2025 默认）</option>
+                  <option value="pre_stim">刺激前 [-0.5, 0] s</option>
+                  <option value="none">不做基线校正</option>
+                </select>
+              </label>
+              <label>Epoch 起点 (s)
+                <input id="preTmin" type="number" value="-1.0" step="0.1" />
+              </label>
+              <label>Epoch 终点 (s)
+                <input id="preTmax" type="number" value="2.5" step="0.1" />
+              </label>
+              <label>IQR 剔除权重 w
+                <input id="preIqrW" type="number" value="2.3" step="0.1" />
+              </label>
+              <label>包含阶段
+                <select id="prePhase">
+                  <option value="main" selected>仅正式试次 (main)</option>
+                  <option value="all">练习 + 正式全部</option>
+                </select>
+              </label>
+            </div>
+            <div id="badChannelBox" class="bad-ch-box"></div>
+            <div id="preprocessBody" class="panel-body empty-hint">调整参数（或保持 PNAS 2025 默认推荐值）后点击一键运行预处理。</div>
+          </div>
+        </section>
+
+        <!-- STEP 6: Extensible Plugins -->
+        <section id="panel-plugins" class="step-panel">
+          <div class="guide-box">
+            <div class="guide-title">📘 Step 6 扩展开发说明（师弟二次开发指南）</div>
+            <ul>
+              <li><strong>零侵入扩展</strong>：本系统采用容错插件发现机制（单个插件报错不会影响主程序启动）。后续做电生理精细分析（HFA 70–150Hz、Morlet 时频、SVM/MVPA 解码、Ripple 检测、情绪回归）无需修改前端或主程序代码。</li>
+              <li><strong>3 步接入新插件</strong>：在 <code>judgement-bias-studio/backend/app/plugins/</code> 下新建 `.py` 文件 → 继承 <code>AnalysisPlugin</code> 并声明 <code>params_schema</code> 与 <code>run(ctx, params)</code> → 点击右上角「刷新插件列表」即可自动生成参数表单与结果展示卡片。</li>
+            </ul>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Step 6 · 扩展分析插件（可插拔架构）</h2>
+                <p class="muted">直接读取 Step 3/4/5 产出的标准 `.fif`、行为汇总与脑区坐标表，随插随用。</p>
+              </div>
+              <div class="btn-group">
+                <button class="btn btn-ai-soft btn-ai-step" data-step="plugins">✨ AI 推荐分析思路</button>
+                <button id="btnRefreshPlugins" class="btn btn-ghost">刷新插件列表</button>
+              </div>
+            </div>
+            <div id="pluginsBody" class="plugins-grid"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <!-- Right Slide-over AI Assistant Drawer -->
+    <aside id="aiDrawer" class="ai-drawer hidden">
+      <div class="ai-head">
+        <div>
+          <div style="font-weight:700;">✨ AI 辅助分析助手</div>
+          <div id="aiModelBadge" class="muted" style="font-size:11px;">OpenCode Go · deepseek-v4.1-flash-1017</div>
+        </div>
+        <button id="btnCloseAi" class="btn btn-ghost btn-sm">✕</button>
+      </div>
+      <div class="ai-quick">
+        <button class="btn btn-ghost btn-sm ai-qbtn" data-q="请对当前步骤的结果做一份简明质控评估，指出是否合格以及有无需要注意的异常点。">质控评估</button>
+        <button class="btn btn-ghost btn-sm ai-qbtn" data-q="结合当前被试的行为偏倚与电极覆盖情况，建议接下来重点分析哪些脑区或电生理指标？">下一步建议</button>
+        <button class="btn btn-ghost btn-sm ai-qbtn" data-q="用通俗易懂的语言向刚接手课题的师弟总结这位被试目前的数据特点。">师弟交接摘要</button>
+      </div>
+      <div id="aiMessages" class="ai-messages">
+        <div class="ai-msg bot">你好！我会自动读取当前被试已完成的体检、行为、电极定位与 SEEG 预处理结果，帮你做质控解读或给分析建议。请先确认右上角「⚙ AI 设置」已填入你的 OpenCode Go Key。</div>
+      </div>
+      <div class="ai-input-row">
+        <textarea id="aiInput" rows="2" placeholder="输入问题（例如：这个被试的 biasScore 偏高说明什么？哪些电极在海马或岛叶？）"></textarea>
+        <button id="btnSendAi" class="btn btn-primary">发送</button>
+      </div>
+    </aside>
+  </div>
+
+  <!-- New Subject Modal -->
+  <div id="modalBackdrop" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>导入新被试</h3>
+        <button id="btnCloseModal" class="btn btn-ghost">✕</button>
+      </div>
+      <div class="modal-body">
+        <label>被试根目录路径（填入后点“自动扫描”即可自动填全下面 5 项）
+          <div class="inline-input">
+            <input id="mFolder" type="text" placeholder="/Users/.../Subject002" />
+            <button id="btnDiscoverFolder" class="btn btn-ghost">自动扫描</button>
+          </div>
+        </label>
+        <div class="form-grid-2">
+          <label>被试编号 (ID)
+            <input id="mSubId" type="text" placeholder="sub-002_xxx" />
+          </label>
+          <label>显示名称
+            <input id="mName" type="text" placeholder="姓名或代号" />
+          </label>
+        </div>
+        <label>术前 MRI 文件夹（必备）<input id="mMri" type="text" /></label>
+        <label>术后 CT 文件夹（必备）<input id="mCt" type="text" /></label>
+        <label>SEEG EDF 文件路径（必备）<input id="mEdf" type="text" /></label>
+        <label>行为学 JSON 文件路径（必备）<input id="mBeh" type="text" /></label>
+        <label>医生术后核对电极位置表 .xlsx/.csv（<strong>可选</strong>：有最好，没有也能继续分析）<input id="mExcel" type="text" placeholder="可留空" /></label>
+      </div>
+      <div class="modal-foot">
+        <button id="btnCancelModal" class="btn btn-ghost">取消</button>
+        <button id="btnSaveSubject" class="btn btn-primary">保存并导入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Settings Modal (OpenCode Go) -->
+  <div id="aiModalBackdrop" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>⚙ AI 接口设置（OpenCode Go）</h3>
+        <button id="btnCloseAiModal" class="btn btn-ghost">✕</button>
+      </div>
+      <div class="modal-body">
+        <label>OpenCode Go 请求地址 (Base URL)
+          <input id="aiBaseUrl" type="text" value="https://opencode.ai/zen/go/v1" />
+        </label>
+        <label>模型名称（默认 DeepSeek Flash 最新版）
+          <input id="aiModel" type="text" value="deepseek-v4.1-flash-1017" list="aiModelPresets" />
+          <datalist id="aiModelPresets">
+            <option value="deepseek-v4.1-flash-1017"></option>
+            <option value="deepseek-v4.1-flash"></option>
+            <option value="deepseek-v4-pro"></option>
+          </datalist>
+        </label>
+        <label>OpenCode Go API Key（仅保存在本机，不会上传到第三方）
+          <input id="aiApiKey" type="password" placeholder="粘贴您的 OpenCode Go API Key…" />
+        </label>
+        <div id="aiKeyStatus" class="muted" style="font-size:12px;"></div>
+        <div class="warn-banner" style="font-size:11.5px; margin-top:4px;">🔒 隐私与伦理提醒：常规 AI 问答仅发送匿名 <code>subject_id</code> 与数值指标（不发送患者真实姓名）；使用「临床拍照 AI 识别」向外部 API 上传病历图片前，请先遮挡姓名/住院号并确认符合医院伦理批件要求。</div>
+      </div>
+      <div class="modal-foot">
+        <button id="btnCancelAiModal" class="btn btn-ghost">取消</button>
+        <button id="btnSaveAiConfig" class="btn btn-primary">保存配置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Busy Overlay -->
+  <div id="busyOverlay" class="busy-overlay hidden">
+    <div class="busy-box">
+      <div class="spinner"></div>
+      <div id="busyText">正在处理…</div>
+    </div>
+  </div>
+
+  <!-- Reuse Sinovation WebGL2 3D Brain & Depth-Occluded Electrode Modules -->
+  <script src="/sino-static/electrode-depth.js"></script>
+  <script src="/sino-static/volume3d.js"></script>
+  <script src="/static/app.js?v=1.3"></script>
+</body>
+</html>
